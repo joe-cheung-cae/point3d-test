@@ -13,6 +13,8 @@
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
 #include <thrust/reverse.h>
+#include <numeric>
+#include <limits>
 
 // ============================================
 // Basic Data Structures
@@ -73,53 +75,55 @@ class KDTree {
 private:
     struct Node {
         Point3D point;
-        int index;
+        size_t index;
         int axis;  // 0:x, 1:y, 2:z
         Node* left;
         Node* right;
-        
-        Node(const Point3D& p, int idx, int ax) 
+
+        Node(const Point3D& p, size_t idx, int ax)
             : point(p), index(idx), axis(ax), left(nullptr), right(nullptr) {}
     };
     
     Node* root_;
-    thrust::host_vector<Point3D> points_;
 
-    Node* buildTree(thrust::host_vector<std::pair<Point3D, int>>& points_vec,
-                   int start, int end, int depth) {
+    Node* buildTree(const thrust::host_vector<Point3D>& points,
+                    thrust::host_vector<size_t>& indices,
+                    int start, int end, int depth) {
         if (start >= end) return nullptr;
-        
+
         int axis = depth % 3;
-        
-        // Sort points along the current axis (x, y, or z) for balanced tree construction
-        thrust::sort(points_vec.begin() + start, points_vec.begin() + end,
-                 [axis](const auto& a, const auto& b) {
-                     if (axis == 0) return a.first.x < b.first.x;
-                     if (axis == 1) return a.first.y < b.first.y;
-                     return a.first.z < b.first.z;
-                 });
-        
+
+        // Sort indices based on points along the current axis
+        thrust::sort(indices.begin() + start, indices.begin() + end,
+                  [&](size_t a, size_t b) {
+                      const Point3D& pa = points[a];
+                      const Point3D& pb = points[b];
+                      if (axis == 0) return pa.x < pb.x;
+                      if (axis == 1) return pa.y < pb.y;
+                      return pa.z < pb.z;
+                  });
+
         int mid = start + (end - start) / 2;
-        Node* node = new Node(points_vec[mid].first, points_vec[mid].second, axis);
-        
-        node->left = buildTree(points_vec, start, mid, depth + 1);
-        node->right = buildTree(points_vec, mid + 1, end, depth + 1);
-        
+        Node* node = new Node(points[indices[mid]], indices[mid], axis);
+
+        node->left = buildTree(points, indices, start, mid, depth + 1);
+        node->right = buildTree(points, indices, mid + 1, end, depth + 1);
+
         return node;
     }
     
     void kNearestNeighbors(Node* node, const Point3D& query,
-                          std::priority_queue<std::pair<double, int>>& heap,
-                          int k) const {
+                           std::priority_queue<std::pair<double, size_t>>& heap,
+                           int k) const {
         if (!node) return;
-        
+
         double dist_sq = query.squaredDistance(node->point);
         heap.push({dist_sq, node->index});
-        
+
         if (heap.size() > k) {
             heap.pop();
         }
-        
+
         double diff;
         if (node->axis == 0) {
             diff = query.x - node->point.x;
@@ -128,12 +132,12 @@ private:
         } else {
             diff = query.z - node->point.z;
         }
-        
+
         Node* first = diff <= 0 ? node->left : node->right;
         Node* second = diff <= 0 ? node->right : node->left;
-        
+
         kNearestNeighbors(first, query, heap, k);
-        
+
         // Check if the other subtree could contain closer points based on the splitting plane
         if (heap.size() < k || diff * diff < heap.top().first) {
             kNearestNeighbors(second, query, heap, k);
@@ -141,14 +145,14 @@ private:
     }
     
     void radiusSearch(Node* node, const Point3D& query, double radius_sq,
-                     thrust::host_vector<int>& results) const {
+                      thrust::host_vector<size_t>& results) const {
         if (!node) return;
-        
+
         double dist_sq = query.squaredDistance(node->point);
         if (dist_sq <= radius_sq) {
             results.push_back(node->index);
         }
-        
+
         double diff;
         if (node->axis == 0) {
             diff = query.x - node->point.x;
@@ -157,7 +161,7 @@ private:
         } else {
             diff = query.z - node->point.z;
         }
-        
+
         if (diff <= 0) {
             radiusSearch(node->left, query, radius_sq, results);
             if (diff * diff <= radius_sq) {
@@ -172,15 +176,10 @@ private:
     }
     
 public:
-    KDTree(const thrust::host_vector<Point3D>& points) : points_(points) {
-        thrust::host_vector<std::pair<Point3D, int>> points_vec;
-        points_vec.reserve(points.size());
-
-        for (size_t i = 0; i < points.size(); ++i) {
-            points_vec.push_back(std::make_pair(points[i], i));
-        }
-
-        root_ = buildTree(points_vec, 0, points.size(), 0);
+    KDTree(const thrust::host_vector<Point3D>& points) {
+        thrust::host_vector<size_t> indices(points.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        root_ = buildTree(points, indices, 0, points.size(), 0);
     }
     
     ~KDTree() {
@@ -195,12 +194,12 @@ public:
     }
     
     // Find k nearest neighbors to the query point
-    thrust::host_vector<std::pair<int, double>> kNearestNeighbors(const Point3D& query, int k) const {
-        std::priority_queue<std::pair<double, int>> heap;
+    thrust::host_vector<std::pair<size_t, double>> kNearestNeighbors(const Point3D& query, int k) const {
+        std::priority_queue<std::pair<double, size_t>> heap;
 
         kNearestNeighbors(root_, query, heap, k);
 
-        thrust::host_vector<std::pair<int, double>> results;
+        thrust::host_vector<std::pair<size_t, double>> results;
         while (!heap.empty()) {
             results.push_back(std::make_pair(heap.top().second, heap.top().first));
             heap.pop();
@@ -211,17 +210,17 @@ public:
     }
     
     // Find all points within a given radius of the query point
-    thrust::host_vector<int> radiusSearch(const Point3D& query, double radius) const {
-        thrust::host_vector<int> results;
+    thrust::host_vector<size_t> radiusSearch(const Point3D& query, double radius) const {
+        thrust::host_vector<size_t> results;
         double radius_sq = radius * radius;
         radiusSearch(root_, query, radius_sq, results);
         return results;
     }
     
     // Find the single nearest neighbor to the query point
-    std::pair<int, double> nearestNeighbor(const Point3D& query) const {
+    std::pair<size_t, double> nearestNeighbor(const Point3D& query) const {
         auto neighbors = kNearestNeighbors(query, 1);
-        if (neighbors.empty()) return {-1, 0.0};
+        if (neighbors.empty()) return {std::numeric_limits<size_t>::max(), 0.0};
         return neighbors[0];
     }
 };
@@ -254,10 +253,10 @@ public:
         
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, points_.size() - 1);
+        std::uniform_int_distribution<size_t> dis(0, points_.size() - 1);
         
         for (int i = 0; i < actual_samples; ++i) {
-            int idx = dis(gen);
+            size_t idx = dis(gen);
             auto neighbors = kdtree_->kNearestNeighbors(points_[idx], 2); // Self + nearest neighbor
             if (neighbors.size() > 1) {
                 sum_distances += std::sqrt(neighbors[1].second);
@@ -277,15 +276,15 @@ public:
         
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, points_.size() - 1);
-        
+        std::uniform_int_distribution<size_t> dis(0, points_.size() - 1);
+
         for (int i = 0; i < sample_count; ++i) {
-            int idx = dis(gen);
+            size_t idx = dis(gen);
             auto neighbors = kdtree_->radiusSearch(points_[idx], search_radius);
-            
+
             // Exclude self
             int neighbor_count = 0;
-            for (int n_idx : neighbors) {
+            for (size_t n_idx : neighbors) {
                 if (n_idx != idx) neighbor_count++;
             }
             
@@ -317,7 +316,7 @@ public:
             int sample_count = std::min(200, static_cast<int>(points_.size()));
             std::random_device rd;
             std::mt19937 gen(rd());
-            std::uniform_int_distribution<> dis(0, points_.size() - 1);
+            std::uniform_int_distribution<size_t> dis(0, points_.size() - 1);
 
             for (int i = 0; i < sample_count; ++i) {
                 int idx = dis(gen);
@@ -445,7 +444,7 @@ public:
         
         // Find nearest point to estimate local characteristic length
         auto nearest = kdtree_->nearestNeighbor(query);
-        if (nearest.first == -1) {
+        if (nearest.first == std::numeric_limits<size_t>::max()) {
             return {0.0, 0.0, 0.0};
         }
         
@@ -481,14 +480,14 @@ public:
         std::array<double, 3> result = {0.0, 0.0, 0.0};
         double total_weight = 0.0;
         
-        for (int idx : indices) {
+        for (size_t idx : indices) {
             double dist = query.distance(points_[idx]);
-            
+
             // Adaptive weight: consider local characteristic length
             double local_scale = local_char_lengths_[idx];
             double epsilon = local_scale * 0.1; // Prevent division by zero
             double weight = 1.0 / (dist * dist + epsilon * epsilon);
-            
+
             for (int comp = 0; comp < 3; ++comp) {
                 result[comp] += weight * field_values_[idx][comp];
             }
@@ -515,7 +514,7 @@ public:
         
         // Estimate local characteristic length
         auto nearest = kdtree_->nearestNeighbor(query);
-        if (nearest.first == -1) return gradient;
+        if (nearest.first == std::numeric_limits<size_t>::max()) return gradient;
         
         double h;
         if (nearest.first < local_char_lengths_.size()) {
