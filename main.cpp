@@ -10,6 +10,10 @@
 #include <unordered_map>
 #include <functional>
 
+#include <thrust/host_vector.h>
+#include <thrust/sort.h>
+#include <thrust/reverse.h>
+
 // ============================================
 // Basic Data Structures
 // ============================================
@@ -79,16 +83,16 @@ private:
     };
     
     Node* root_;
-    std::vector<Point3D> points_;
-    
-    Node* buildTree(std::vector<std::pair<Point3D, int>>& points_vec, 
+    thrust::host_vector<Point3D> points_;
+
+    Node* buildTree(thrust::host_vector<std::pair<Point3D, int>>& points_vec,
                    int start, int end, int depth) {
         if (start >= end) return nullptr;
         
         int axis = depth % 3;
         
         // Sort points along the current axis (x, y, or z) for balanced tree construction
-        std::sort(points_vec.begin() + start, points_vec.begin() + end,
+        thrust::sort(points_vec.begin() + start, points_vec.begin() + end,
                  [axis](const auto& a, const auto& b) {
                      if (axis == 0) return a.first.x < b.first.x;
                      if (axis == 1) return a.first.y < b.first.y;
@@ -137,7 +141,7 @@ private:
     }
     
     void radiusSearch(Node* node, const Point3D& query, double radius_sq,
-                     std::vector<int>& results) const {
+                     thrust::host_vector<int>& results) const {
         if (!node) return;
         
         double dist_sq = query.squaredDistance(node->point);
@@ -168,14 +172,14 @@ private:
     }
     
 public:
-    KDTree(const std::vector<Point3D>& points) : points_(points) {
-        std::vector<std::pair<Point3D, int>> points_vec;
+    KDTree(const thrust::host_vector<Point3D>& points) : points_(points) {
+        thrust::host_vector<std::pair<Point3D, int>> points_vec;
         points_vec.reserve(points.size());
-        
+
         for (size_t i = 0; i < points.size(); ++i) {
-            points_vec.emplace_back(points[i], i);
+            points_vec.push_back(std::make_pair(points[i], i));
         }
-        
+
         root_ = buildTree(points_vec, 0, points.size(), 0);
     }
     
@@ -191,24 +195,24 @@ public:
     }
     
     // Find k nearest neighbors to the query point
-    std::vector<std::pair<int, double>> kNearestNeighbors(const Point3D& query, int k) const {
+    thrust::host_vector<std::pair<int, double>> kNearestNeighbors(const Point3D& query, int k) const {
         std::priority_queue<std::pair<double, int>> heap;
-        
+
         kNearestNeighbors(root_, query, heap, k);
-        
-        std::vector<std::pair<int, double>> results;
+
+        thrust::host_vector<std::pair<int, double>> results;
         while (!heap.empty()) {
-            results.emplace_back(heap.top().second, heap.top().first);
+            results.push_back(std::make_pair(heap.top().second, heap.top().first));
             heap.pop();
         }
-        std::reverse(results.begin(), results.end()); // Convert to distances from small to large
-        
+        thrust::reverse(results.begin(), results.end()); // Convert to distances from small to large
+
         return results;
     }
     
     // Find all points within a given radius of the query point
-    std::vector<int> radiusSearch(const Point3D& query, double radius) const {
-        std::vector<int> results;
+    thrust::host_vector<int> radiusSearch(const Point3D& query, double radius) const {
+        thrust::host_vector<int> results;
         double radius_sq = radius * radius;
         radiusSearch(root_, query, radius_sq, results);
         return results;
@@ -231,11 +235,11 @@ public:
 
 class StatisticalLengthEstimator {
 private:
-    std::vector<Point3D> points_;
+    thrust::host_vector<Point3D> points_;
     std::unique_ptr<KDTree> kdtree_;
-    
+
 public:
-    StatisticalLengthEstimator(const std::vector<Point3D>& points) 
+    StatisticalLengthEstimator(const thrust::host_vector<Point3D>& points)
         : points_(points) {
         kdtree_ = std::make_unique<KDTree>(points_);
     }
@@ -302,65 +306,65 @@ public:
     // Uses multiple k-values to compute characteristic lengths at different scales and takes the median
     double estimateMultiScale(int max_k = 50) {
         if (points_.empty()) return 0.0;
-        
-        std::vector<double> characteristic_lengths;
-        
+
+        thrust::host_vector<double> characteristic_lengths;
+
         // Calculate characteristic length at different scales
         for (int k = 2; k <= max_k; k *= 2) {
             double sum_kdist = 0.0;
             int valid_samples = 0;
-            
+
             int sample_count = std::min(200, static_cast<int>(points_.size()));
             std::random_device rd;
             std::mt19937 gen(rd());
             std::uniform_int_distribution<> dis(0, points_.size() - 1);
-            
+
             for (int i = 0; i < sample_count; ++i) {
                 int idx = dis(gen);
                 auto neighbors = kdtree_->kNearestNeighbors(points_[idx], k + 1);
-                
+
                 if (neighbors.size() > k) {
                     // Distance to the k-th nearest neighbor
                     sum_kdist += std::sqrt(neighbors[k].second);
                     valid_samples++;
                 }
             }
-            
+
             if (valid_samples > 0) {
                 characteristic_lengths.push_back(sum_kdist / valid_samples);
             }
         }
-        
+
         if (characteristic_lengths.empty()) return 0.0;
-        
+
         // Take median as final estimate (more robust to outliers)
-        std::sort(characteristic_lengths.begin(), characteristic_lengths.end());
+        thrust::sort(characteristic_lengths.begin(), characteristic_lengths.end());
         return characteristic_lengths[characteristic_lengths.size() / 2];
     }
     
     // Method 4: Compute local characteristic lengths for each point
     // Calculates individual characteristic lengths based on k-nearest neighbors for each point
-    std::vector<double> computeLocalCharacteristicLengths(int k_neighbors = 6) {
-        std::vector<double> local_lengths(points_.size(), 0.0);
-        
+    thrust::host_vector<double> computeLocalCharacteristicLengths(int k_neighbors = 6) {
+        thrust::host_vector<double> local_lengths(points_.size(), 0.0);
+
         #pragma omp parallel for
         for (size_t i = 0; i < points_.size(); ++i) {
             auto neighbors = kdtree_->kNearestNeighbors(points_[i], k_neighbors + 1);
-            
+
             double sum_dist = 0.0;
             int count = 0;
-            
+
             // Skip self (first nearest neighbor is self)
             for (size_t j = 1; j < neighbors.size(); ++j) {
                 sum_dist += std::sqrt(neighbors[j].second);
                 count++;
             }
-            
+
             if (count > 0) {
                 local_lengths[i] = sum_dist / count;
             }
         }
-        
+
         return local_lengths;
     }
     
@@ -379,9 +383,9 @@ public:
         double method3 = estimateFromLocalDensity(initial_radius);
         
         // Return robust average of three methods (remove outliers)
-        std::vector<double> methods = {method1, method2, method3};
-        std::sort(methods.begin(), methods.end());
-        
+        thrust::host_vector<double> methods = {method1, method2, method3};
+        thrust::sort(methods.begin(), methods.end());
+
         // Use median as final result
         return methods[1]; // median
     }
@@ -396,18 +400,18 @@ public:
 
 class AdaptiveFieldInterpolator {
 private:
-    std::vector<Point3D> points_;
-    std::vector<std::array<double, 3>> field_values_;
+    thrust::host_vector<Point3D> points_;
+    thrust::host_vector<std::array<double, 3>> field_values_;
     std::unique_ptr<KDTree> kdtree_;
-    std::vector<double> local_char_lengths_;
+    thrust::host_vector<double> local_char_lengths_;
     double global_char_length_;
-    
+
     // Cache recent query results to improve performance for repeated interpolations
     mutable std::unordered_map<Point3D, std::array<double, 3>, Point3DHash> interpolation_cache_;
-    
+
 public:
-    AdaptiveFieldInterpolator(const std::vector<Point3D>& points,
-                            const std::vector<std::array<double, 3>>& field_values)
+    AdaptiveFieldInterpolator(const thrust::host_vector<Point3D>& points,
+                            const thrust::host_vector<std::array<double, 3>>& field_values)
         : points_(points), field_values_(field_values) {
         
         if (points.size() != field_values.size()) {
@@ -554,7 +558,7 @@ public:
         return global_char_length_;
     }
     
-    const std::vector<double>& getLocalCharacteristicLengths() const {
+    const thrust::host_vector<double>& getLocalCharacteristicLengths() const {
         return local_char_lengths_;
     }
 };
@@ -565,8 +569,8 @@ public:
 // Utility functions for creating synthetic point clouds and magnetic field data
 // for testing and demonstration purposes.
 
-std::vector<Point3D> generateTestPoints(int count, double domain_size = 10.0) {
-    std::vector<Point3D> points;
+thrust::host_vector<Point3D> generateTestPoints(int count, double domain_size = 10.0) {
+    thrust::host_vector<Point3D> points;
     points.reserve(count);
     
     std::random_device rd;
@@ -574,14 +578,14 @@ std::vector<Point3D> generateTestPoints(int count, double domain_size = 10.0) {
     std::uniform_real_distribution<> dis(0.0, domain_size);
     
     for (int i = 0; i < count; ++i) {
-        points.emplace_back(dis(gen), dis(gen), dis(gen));
+        points.push_back(Point3D(dis(gen), dis(gen), dis(gen)));
     }
     
     return points;
 }
 
-std::vector<std::array<double, 3>> generateTestField(const std::vector<Point3D>& points) {
-    std::vector<std::array<double, 3>> field_values;
+thrust::host_vector<std::array<double, 3>> generateTestField(const thrust::host_vector<Point3D>& points) {
+    thrust::host_vector<std::array<double, 3>> field_values;
     field_values.reserve(points.size());
     
     // Generate a simple magnetic field using a dipole model for testing
@@ -673,7 +677,7 @@ void runDemo() {
         auto end_build = std::chrono::high_resolution_clock::now();
         
         // Test several query points
-        std::vector<Point3D> query_points = {
+        thrust::host_vector<Point3D> query_points = {
             Point3D(5.0, 5.0, 5.0),
             Point3D(2.0, 3.0, 4.0),
             Point3D(7.0, 8.0, 6.0),
@@ -728,7 +732,7 @@ void runDemo() {
         AdaptiveFieldInterpolator interpolator(points, field_values);
         
         // Generate 100 random query points
-        std::vector<Point3D> test_queries = generateTestPoints(100, 10.0);
+        thrust::host_vector<Point3D> test_queries = generateTestPoints(100, 10.0);
         
         auto start = std::chrono::high_resolution_clock::now();
         
